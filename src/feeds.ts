@@ -2,28 +2,27 @@ import { EdDSAPCDPackage } from "@pcd/eddsa-pcd";
 import {
   EdDSATicketPCD,
   EdDSATicketPCDPackage,
-  TicketCategory
+  ITicketData
 } from "@pcd/eddsa-ticket-pcd";
-import { EmailPCD, EmailPCDPackage } from "@pcd/email-pcd";
+import { EmailPCDPackage } from "@pcd/email-pcd";
 import {
   FeedHost,
+  PollFeedRequest,
   PollFeedResponseValue,
   verifyFeedCredential
 } from "@pcd/passport-interface";
 import {
+  DeleteFolderPermission,
+  PCDAction,
   PCDActionType,
   PCDPermissionType,
-  ReplaceInFolderAction,
   ReplaceInFolderPermission
 } from "@pcd/pcd-collection";
 import { ArgumentTypeName, SerializedPCD } from "@pcd/pcd-types";
-import {
-  SemaphoreSignaturePCD,
-  SemaphoreSignaturePCDPackage
-} from "@pcd/semaphore-signature-pcd";
+import { SemaphoreSignaturePCDPackage } from "@pcd/semaphore-signature-pcd";
 import _ from "lodash";
 import path from "path";
-import { v4 as uuid } from "uuid";
+import { Ticket, loadTickets } from "./config";
 import { ZUPASS_PUBLIC_KEY } from "./main";
 
 const fullPath = path.join(__dirname, "../artifacts/");
@@ -35,127 +34,119 @@ SemaphoreSignaturePCDPackage.init?.({
 EdDSAPCDPackage.init?.({});
 EdDSATicketPCDPackage.init?.({});
 
-const EVENT_ID = "32cb7908-aad7-4ee4-8eb7-49227f4b28e7";
-const REGULAR_PRODUCT_ID = "39ed8025-2980-4bfb-ae18-6a1b0970d5f4";
-const DAYPASS_PRODUCT_ID = "2c1c5aea-67be-4b54-87ab-427275e46c37";
+export let feedHost: FeedHost;
 
-interface PollFeedRequest {
-  feedId: string;
-  pcd?: SerializedPCD<SemaphoreSignaturePCD>;
-}
-
-interface CredentialPayload {
-  timestamp: number;
-  emailPCD?: SerializedPCD<EmailPCD>;
-}
-
-async function unpackCredential(
-  spcd: SerializedPCD<SemaphoreSignaturePCD>
-): Promise<CredentialPayload | null> {
-  if (spcd.type !== SemaphoreSignaturePCDPackage.name) {
-    throw new Error(`not a semaphore signature pcd`);
-  }
-  const pcd = await SemaphoreSignaturePCDPackage.deserialize(spcd.pcd);
-  const verified = await SemaphoreSignaturePCDPackage.verify(pcd);
-
-  if (verified) {
-    const payload: CredentialPayload = JSON.parse(pcd.claim.signedMessage);
-    return payload;
-  }
-
-  return null;
-}
-
-export const feedHost = new FeedHost(
-  [
-    {
-      feed: {
-        id: "1",
-        name: "First feed",
-        description: "First test feed",
-        permissions: [
-          {
-            folder: "Testing",
-            type: PCDPermissionType.ReplaceInFolder
-          } as ReplaceInFolderPermission
-        ],
-        credentialRequest: {
-          signatureType: "sempahore-signature-pcd",
-          pcdType: "email-pcd"
-        }
-      },
-      handleRequest: async (
-        req: PollFeedRequest
-      ): Promise<PollFeedResponseValue> => {
-        if (req.pcd === undefined) {
-          throw new Error(`Missing credential`);
-        }
-        const { pcd, payload } = await verifyFeedCredential(req.pcd);
-        console.log(payload);
-
-        if (payload?.pcd && payload.pcd.type === EmailPCDPackage.name) {
-          const pcd = await EmailPCDPackage.deserialize(payload?.pcd.pcd);
-          const verified =
-            (await EmailPCDPackage.verify(pcd)) &&
-            _.isEqual(pcd.proof.eddsaPCD.claim.publicKey, ZUPASS_PUBLIC_KEY);
-          console.log(verified);
-          if (verified) {
-            return {
-              actions: [
-                {
-                  pcds: [
-                    await issueTestPCD(
-                      pcd.claim.emailAddress,
-                      pcd.claim.semaphoreId,
-                      REGULAR_PRODUCT_ID
-                    )
-                  ],
-                  folder: "Testing",
-                  type: PCDActionType.ReplaceInFolder
-                } as ReplaceInFolderAction,
-                {
-                  pcds: [
-                    await issueTestPCD(
-                      pcd.claim.emailAddress,
-                      pcd.claim.semaphoreId,
-                      DAYPASS_PRODUCT_ID
-                    )
-                  ],
-                  folder: "Testing",
-                  type: PCDActionType.ReplaceInFolder
-                } as ReplaceInFolderAction
-              ]
-            };
+export async function initFeedHost() {
+  const tickets = await loadTickets();
+  const folders = Object.keys(tickets);
+  feedHost = new FeedHost(
+    [
+      {
+        feed: {
+          id: "1",
+          name: "First feed",
+          description: "First test feed",
+          permissions: folders.flatMap((folder) => {
+            return [
+              {
+                folder,
+                type: PCDPermissionType.ReplaceInFolder
+              } as ReplaceInFolderPermission,
+              {
+                folder,
+                type: PCDPermissionType.DeleteFolder
+              } as DeleteFolderPermission
+            ];
+          }),
+          credentialRequest: {
+            signatureType: "sempahore-signature-pcd",
+            pcdType: "email-pcd"
           }
+        },
+        handleRequest: async (
+          req: PollFeedRequest
+        ): Promise<PollFeedResponseValue> => {
+          if (req.pcd === undefined) {
+            throw new Error(`Missing credential`);
+          }
+          const { payload } = await verifyFeedCredential(req.pcd);
+
+          if (payload?.pcd && payload.pcd.type === EmailPCDPackage.name) {
+            const pcd = await EmailPCDPackage.deserialize(payload?.pcd.pcd);
+            const verified =
+              (await EmailPCDPackage.verify(pcd)) &&
+              _.isEqual(pcd.proof.eddsaPCD.claim.publicKey, ZUPASS_PUBLIC_KEY);
+            if (verified) {
+              return {
+                actions: await feedActionsForEmail(
+                  pcd.claim.emailAddress,
+                  pcd.claim.semaphoreId
+                )
+              };
+            }
+          }
+          return { actions: [] };
         }
-        return { actions: [] };
+      }
+    ],
+    "http://localhost:3100/feeds",
+    "Test Feed Server"
+  );
+}
+
+async function feedActionsForEmail(
+  emailAddress: string,
+  semaphoreId: string
+): Promise<PCDAction[]> {
+  const ticketsForUser: Record<string, Ticket[]> = {};
+
+  const tickets = await loadTickets();
+
+  for (const [folder, folderTickets] of Object.entries(tickets)) {
+    for (const ticket of folderTickets) {
+      if (ticket.attendeeEmail === emailAddress) {
+        if (!ticketsForUser[folder]) {
+          ticketsForUser[folder] = [];
+        }
+        ticketsForUser[folder].push(ticket);
       }
     }
-  ],
-  "http://localhost:3100/feeds",
-  "Test Feed Server"
-);
+  }
 
-async function issueTestPCD(
-  emailAddress: string,
-  semaphoreId: string,
-  productId: string
+  const actions = [];
+
+  for (const [folder, tickets] of Object.entries(ticketsForUser)) {
+    // Clear out the folder
+    actions.push({
+      type: PCDActionType.DeleteFolder,
+      folder,
+      recursive: false
+    });
+
+    actions.push({
+      type: PCDActionType.ReplaceInFolder,
+      folder,
+      pcds: await Promise.all(
+        tickets.map((ticket) => issueTicketPCD(ticket, semaphoreId))
+      )
+    });
+  }
+
+  return actions;
+}
+
+async function issueTicketPCD(
+  ticket: Ticket,
+  semaphoreId: string
 ): Promise<SerializedPCD<EdDSATicketPCD>> {
-  const ticketData = {
-    attendeeName: "test name",
-    attendeeEmail: emailAddress,
-    eventName: "event",
-    ticketName: "ticket",
-    checkerEmail: "checker@test.com",
-    ticketId: uuid(),
-    eventId: EVENT_ID,
-    productId: productId,
-    timestampConsumed: Date.now(),
-    timestampSigned: Date.now(),
-    attendeeSemaphoreId: semaphoreId,
+  const ticketData: ITicketData = {
+    ...ticket,
+    checkerEmail: "",
     isConsumed: false,
     isRevoked: false,
-    ticketCategory: TicketCategory.ZuConnect
+    attendeeSemaphoreId: semaphoreId,
+    timestampConsumed: 0,
+    timestampSigned: Date.now()
   };
 
   const pcd = await EdDSATicketPCDPackage.prove({

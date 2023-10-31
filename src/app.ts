@@ -1,5 +1,6 @@
 import cors from "cors";
 import express from "express";
+import { initFeedHost } from "./feeds";
 import routes from "./routes";
 
 class Application {
@@ -25,9 +26,9 @@ class Application {
     this.server.use(routes);
   }
 
-  public start({ port }: { port: number }) {
+  public async start({ port }: { port: number }) {
     console.log(`Server starting at http://localhost:${port}`);
-
+    await initFeedHost();
     this.server.listen(port);
   }
 }
