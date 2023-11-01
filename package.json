@@ -4,7 +4,7 @@
     "dev": "NODE_ENV=development ts-node-dev --exit-child -- src/main.ts",
     "build": "tsc --noEmit",
     "lint": "eslint \"**/*.ts{,x}\"",
-    "start": "NODE_ENV=production PORT=8080 ts-node src/main.ts"
+    "start": "NODE_ENV=production PORT=3000 ts-node src/main.ts"
   },
   "devDependencies": {
     "@pcd/eslint-config-custom": "^0.6.2",
