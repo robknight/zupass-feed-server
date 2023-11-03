@@ -1,3 +1,4 @@
+import { getEdDSAPublicKey } from "@pcd/eddsa-pcd";
 import { ListFeedsRequest, PollFeedRequest } from "@pcd/passport-interface";
 import { Router } from "express";
 import { feedHost } from "./feeds";
@@ -28,6 +29,12 @@ routes.get("/feeds/:feedId", async (req, res) => {
   } else {
     return res.status(404).send("not found");
   }
+});
+
+routes.get("/issue/eddsa-public-key", async (req, res) => {
+  return res.json(
+    await getEdDSAPublicKey(process.env.SERVER_PRIVATE_KEY as string)
+  );
 });
 
 export default routes;
